@@ -2,6 +2,10 @@
 
 Prototype of Erlang style process/actor model library in OCaml
 
+## Demo
+
+- See `debug/main.ml` for a runnable example
+
 ## Technical details/discussions
 
 - Right now using Domainslib task pool under the hood
