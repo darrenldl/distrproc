@@ -1,4 +1,4 @@
-SRCFILES = lib/*.ml
+SRCFILES = lib/*.ml debug/*.ml
 
 OCPINDENT = ocp-indent \
 	--inplace \
@@ -7,6 +7,10 @@ OCPINDENT = ocp-indent \
 .PHONY: all
 all :
 	dune build @all
+
+.PHONY: debug
+debug :
+	dune exec --no-buffer debug/main.exe
 
 .PHONY: format
 format :

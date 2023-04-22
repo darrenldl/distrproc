@@ -19,9 +19,10 @@ end
 module Mailbox : sig
   module Local : sig
   type 'a t = {
-    send : Proc.Handle.t -> Proc.Pid.local -> 'a -> unit;
+    send : Proc.Handle.t -> Proc.Pid.t -> 'a -> unit;
     recv : Proc.Handle.t -> Proc.Pid.t * 'a;
   }
+val make : unit -> 'a t
   end
 end
 
@@ -34,5 +35,3 @@ module Gw : sig
 
   val join : t -> unit
 end
-
-val register_local_mailbox : unit -> 'a Mailbox.Local.t

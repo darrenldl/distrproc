@@ -18,9 +18,15 @@ module Proc = struct
 
     let gw_id (t : t) = t.gw_id
 
-    let make ~gw_id : t =
+    let same_gw (x : t) (y : t) =
+      x.gw_id = y.gw_id
+
+    let make_fresh ~gw_id : t =
       let local = !counter in
       counter := !counter + 1;
+      { gw_id; local }
+
+    let make ~gw_id local : t =
       { gw_id; local }
 
     let pp formatter (t : t) =
@@ -35,15 +41,6 @@ module Proc = struct
     let make ~pid = { pid }
 
     let pid (t : t) = t.pid
-  end
-end
-
-module Mailbox = struct
-  module Local = struct
-    type 'a t = {
-      send : Proc.Handle.t -> Proc.Pid.local -> 'a -> unit;
-      recv : Proc.Handle.t -> Proc.Pid.t * 'a;
-    }
   end
 end
 
@@ -89,7 +86,7 @@ module Gw = struct
     t
 
   let run (t : t) (p : Proc.Handle.t -> unit) : Proc.Pid.t =
-    let pid = Proc.Pid.make ~gw_id:t.id in
+    let pid = Proc.Pid.make_fresh ~gw_id:t.id in
     let h = Proc.Handle.make ~pid in
     let promise = D.Task.async t.pool (fun () -> p h) in
     Mutex.lock t.lock;
@@ -98,38 +95,82 @@ module Gw = struct
     pid
 
   let join (t : t) =
-    List.fold_left (fun () promise ->
-        D.Task.await t.pool promise
+    D.Task.run t.pool (fun () ->
+        List.fold_left (fun () promise ->
+            D.Task.await t.pool promise;
+          )
+          ()
+          t.promises
       )
-      ()
-      t.promises
-
 end
 
-let register_local_mailbox (type a) () : a Mailbox.Local.t =
-  let table : (Proc.Pid.local, (Proc.Pid.t * a) K_d.Queue.t) K_d.Hashtbl.t =
-    K_d.Hashtbl.create ()
-  in
-  let send (h : Proc.Handle.t) (pid : Proc.Pid.local) (msg : a) : unit =
-    match K_d.Hashtbl.find_opt table pid with
-    | None -> K_d.Hashtbl.replace table pid (K_d.Queue.create ());
-    | Some q -> K_d.Queue.add (Proc.Handle.pid h, msg) q
-  in
-  let recv (h : Proc.Handle.t) : Proc.Pid.t * a =
-    let pid = Proc.Handle.pid h in
-    let local_pid = Proc.Pid.local pid in
-    let gw = Gw.lookup_gw ~gw_id:(Proc.Pid.gw_id pid) in
-    let rec aux () =
-      match K_d.Hashtbl.find_opt table local_pid with
-      | None -> K_d.Hashtbl.replace table local_pid (K_d.Queue.create ()); aux ()
-      | Some q ->
-        match K_d.Queue.take_opt q with
-        | None -> yield gw.pool; aux ()
-        | Some (src, x) -> (src, x)
-    in
-    aux ()
-  in
-  {
-    send;
-    recv;
-  }
+module Mailbox = struct
+  module Local = struct
+    type 'a t = {
+      send : Proc.Handle.t -> Proc.Pid.t -> 'a -> unit;
+      recv : Proc.Handle.t -> Proc.Pid.t * 'a;
+    }
+
+    type 'a mailbox = {
+      lock : Mutex.t;
+      table : (Proc.Pid.local, (Proc.Pid.local * 'a) K_d.Queue.t) Hashtbl.t;
+    }
+
+    let make (type a) () : a t =
+      let mailbox : a mailbox =
+        {
+          lock = Mutex.create ();
+          table = Hashtbl.create 100;
+        }
+      in
+      let send (h : Proc.Handle.t) (pid : Proc.Pid.t) (msg : a) : unit =
+        let self_pid = Proc.Handle.pid h in
+        if Proc.(Pid.same_gw self_pid pid) then (
+          let local_pid = Proc.Pid.local pid in
+          let q =
+            Mutex.lock mailbox.lock;
+            let q =
+              match Hashtbl.find_opt mailbox.table local_pid with
+              | None -> let q = K_d.Queue.create () in
+                Hashtbl.replace mailbox.table local_pid q;
+                q
+              | Some q -> q
+            in
+            Mutex.unlock mailbox.lock;
+            q
+          in
+          K_d.Queue.add (Proc.Pid.local self_pid, msg) q
+        )
+      in
+      let recv (h : Proc.Handle.t) : Proc.Pid.t * a =
+        let self_pid = Proc.Handle.pid h in
+        let self_local_pid = Proc.Pid.local self_pid in
+        let gw_id = Proc.Pid.gw_id self_pid in
+        let gw = Gw.lookup_gw ~gw_id in
+        let rec aux () =
+          let q =
+            Mutex.lock mailbox.lock;
+            let q = Hashtbl.find_opt mailbox.table self_local_pid in
+            Mutex.unlock mailbox.lock;
+            q
+          in
+          match q with
+          | None -> (
+              yield gw.pool;
+              aux ()
+            )
+          | Some q -> (
+              match K_d.Queue.take_opt q with
+              | None -> yield gw.pool; aux ()
+              | Some (src, x) -> (Proc.Pid.make ~gw_id src, x)
+            )
+        in
+        aux ()
+      in
+      {
+        send;
+        recv;
+      }
+  end
+end
+
