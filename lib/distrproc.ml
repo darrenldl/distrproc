@@ -165,7 +165,8 @@ module Mailbox = struct
           Eio.Mutex.unlock t.lock;
           q
         in
-        K_d.Queue.add (Proc.Pid.local self_pid, msg) q
+        K_d.Queue.add (Proc.Pid.local self_pid, msg) q;
+        Eio.Fiber.yield ()
       )
 
     let requeue (type a) (t : a t) (h : Proc.Handle.t) ((pid, msg) : Proc.Pid.t * a) : unit =
@@ -182,7 +183,8 @@ module Mailbox = struct
         Eio.Mutex.unlock t.lock;
         q
       in
-      K_d.Queue.add (Proc.Pid.local pid, msg) q
+      K_d.Queue.add (Proc.Pid.local pid, msg) q;
+      Eio.Fiber.yield ()
 
     let empty_save_into_main ~save ~main =
       let rec aux () =
@@ -228,87 +230,91 @@ module Mailbox = struct
   end
 end
 
-module Selective_recv = struct
-  type ctx = {
-    received_msg : bool Atomic.t;
-    timed_out : bool Atomic.t;
-  }
+module Selective = struct
+  module Recv = struct
+    type ctx = {
+      received_msg : bool Atomic.t;
+      timed_out : bool Atomic.t;
+    }
 
-  let make_ctx () = {
-    received_msg = Atomic.make false;
-    timed_out = Atomic.make false;
-  }
+    let make_ctx () = {
+      received_msg = Atomic.make false;
+      timed_out = Atomic.make false;
+    }
 
-  type 'a guard = Proc.Pid.t * 'a -> bool
+    type 'a guard = Proc.Pid.t * 'a -> bool
 
-  type ('a, 'b) body = Proc.Pid.t * 'a -> 'b
+    type ('a, 'b) body = Proc.Pid.t * 'a -> 'b
 
-  type ('a, 'b) entry = {
-    guard : 'a guard option;
-    body : ('a, 'b) body;
-  }
+    type ('a, 'b) entry = {
+      guard : 'a guard option;
+      body : ('a, 'b) body;
+    }
 
-  let entry (type a b)
-      ?(guard : a guard option)
-      (body : (a, b) body)
-    : (a, b) entry
-    =
-    { guard; body }
+    let entry (type a b)
+        ?(guard : a guard option)
+        (body : (a, b) body)
+      : (a, b) entry
+      =
+      { guard; body }
 
-  type 'b case = Proc.Handle.t -> ctx -> unit -> 'b
+    type 'b case = Proc.Handle.t -> ctx -> unit -> 'b
 
-  let case_local (type a b)
-      (mailbox : a Mailbox.Local.t)
-      (entries : (a, b) entry list)
-    : b case =
-    fun h ctx () ->
-    let rec try_all (l : (a, b) entry list) (pid, msg) : (a, b) body option =
-      match l with
-      | [] -> None
-      | { guard; body } :: rest -> (
-          match guard with
-          | None -> Some body
-          | Some guard ->
-            if guard (pid, msg) then (
-              Some body
-            ) else (
-              try_all rest (pid, msg)
-            )
-        )
-    in
-    let rec aux () =
-      let r = Mailbox.Local.recv mailbox h in
-      match try_all entries r with
-      | None -> Mailbox.Local.requeue mailbox h r; aux ()
-      | Some body -> (
-          Atomic.set ctx.received_msg true;
-          body r
-        )
-    in
-    aux ()
+    let case_local (type a b)
+        (mailbox : a Mailbox.Local.t)
+        (entries : (a, b) entry list)
+      : b case =
+      fun h ctx () ->
+      let rec try_all (l : (a, b) entry list) (pid, msg) : (a, b) body option =
+        match l with
+        | [] -> None
+        | { guard; body } :: rest -> (
+            match guard with
+            | None -> Some body
+            | Some guard ->
+              if guard (pid, msg) then (
+                Some body
+              ) else (
+                try_all rest (pid, msg)
+              )
+          )
+      in
+      let rec aux () =
+        let r = Mailbox.Local.recv mailbox h in
+        match try_all entries r with
+        | None -> Mailbox.Local.requeue mailbox h r; aux ()
+        | Some body -> (
+            Atomic.set ctx.received_msg true;
+            body r
+          )
+      in
+      aux ()
 
-  let f (type b)
-      (h : Proc.Handle.t)
-      ?(timeout : (float * (unit -> b)) option)
-      (cases : b case list)
-    : b =
-    let clock = Eio.Stdenv.clock (Proc.Handle.env h) in
-    let ctx = make_ctx () in
-    let l = (List.map (fun case -> case h ctx) cases)
-    in
-    let l =
-      match timeout with
-      | None -> l
-      | Some (timeout, timeout_handler) ->
-        (fun () ->
-           Eio.Time.sleep clock timeout;
-           Atomic.set ctx.timed_out true;
-           if Atomic.get ctx.received_msg then
-             Eio.Fiber.await_cancel ()
-           else
-             timeout_handler ()
-        )
-        :: l
-    in
-    Eio.Fiber.any l
+    let f (type b)
+        (h : Proc.Handle.t)
+        ?(timeout : (float * (unit -> b)) option)
+        (cases : b case list)
+      : b =
+      let clock = Eio.Stdenv.clock (Proc.Handle.env h) in
+      let ctx = make_ctx () in
+      let l = (List.map (fun case -> case h ctx) cases)
+      in
+      let l =
+        match timeout with
+        | None -> l
+        | Some (timeout, timeout_handler) ->
+          (fun () ->
+             Eio.Time.sleep clock timeout;
+             Atomic.set ctx.timed_out true;
+             if Atomic.get ctx.received_msg then
+               Eio.Fiber.await_cancel ()
+             else
+               timeout_handler ()
+          )
+          :: l
+      in
+      Eio.Fiber.any l
+  end
+
+  let recv = Recv.f
 end

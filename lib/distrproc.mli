@@ -31,20 +31,22 @@ module Mailbox : sig
   end
 end
 
-module Selective_recv : sig
-  type 'a guard = Proc.Pid.t * 'a -> bool
+module Selective : sig
+  module Recv : sig
+    type 'a guard = Proc.Pid.t * 'a -> bool
 
-  type ('a, 'b) body = Proc.Pid.t * 'a -> 'b
+    type ('a, 'b) body = Proc.Pid.t * 'a -> 'b
 
-  type ('a, 'b) entry
+    type ('a, 'b) entry
 
-  val entry : ?guard:'a guard -> ('a, 'b) body -> ('a, 'b) entry
+    val entry : ?guard:'a guard -> ('a, 'b) body -> ('a, 'b) entry
 
-  type 'a case
+    type 'a case
 
-  val case_local : 'a Mailbox.Local.t -> ('a, 'b) entry list -> 'b case
+    val case_local : 'a Mailbox.Local.t -> ('a, 'b) entry list -> 'b case
+  end
 
-  val f : Proc.Handle.t -> ?timeout:(float * (unit -> 'b)) -> 'b case list -> 'b
+  val recv : Proc.Handle.t -> ?timeout:(float * (unit -> 'b)) -> 'b Recv.case list -> 'b
 end
 
 module Gateway : sig
