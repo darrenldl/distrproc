@@ -13,6 +13,10 @@ module Proc : sig
     type t
 
     val pid : t -> Pid.t
+
+    val env : t -> Eio.Stdenv.t
+
+    val sw : t -> Eio.Switch.t
   end
 end
 
@@ -26,12 +30,10 @@ val make : unit -> 'a t
   end
 end
 
-module Gw : sig
+module Gateway : sig
   type t
 
-  val make : unit -> t
+  val attach : (Proc.Handle.t -> unit) -> Proc.Pid.t
 
-  val run : t -> (Proc.Handle.t -> unit) -> Proc.Pid.t
-
-  val join : t -> unit
+  val main : Eio.Stdenv.t -> unit
 end

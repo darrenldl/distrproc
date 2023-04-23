@@ -10,7 +10,6 @@ let pp_x formatter (x : x) =
       | B -> "B")
 
 let () =
-  let gw = Gw.make () in
   let { send = send_pid; recv = recv_pid } : Proc.Pid.t Mailbox.Local.t =
     Mailbox.Local.make ()
   in
@@ -18,7 +17,7 @@ let () =
     Mailbox.Local.make ()
   in
   let a =
-    Gw.run gw (fun h ->
+    Gateway.attach (fun h ->
         Fmt.epr "a: my pid is %a@." Proc.Pid.pp (Proc.Handle.pid h);
         let _, send_to = recv_pid h in
         Fmt.epr "a: received instruction to send to %a@." Proc.Pid.pp send_to;
@@ -28,7 +27,7 @@ let () =
       )
   in
   let b =
-    Gw.run gw (fun h ->
+    Gateway.attach (fun h ->
         Fmt.epr "b: my pid is %a@." Proc.Pid.pp (Proc.Handle.pid h);
         let _, send_to = recv_pid h in
         Fmt.epr "b: received instruction to send to %a@." Proc.Pid.pp send_to;
@@ -38,7 +37,7 @@ let () =
       )
   in
   let _controller =
-    Gw.run gw (fun h ->
+    Gateway.attach (fun h ->
         Fmt.epr "controller: my pid is %a@." Proc.Pid.pp (Proc.Handle.pid h);
         send_pid h a b;
         Fmt.epr "controller: sent instructions to a@.";
@@ -46,7 +45,7 @@ let () =
         Fmt.epr "controller: sent instructions to b@.";
       )
   in
-  Gw.join gw
+  Eio_main.run Gateway.main
 
 (*
 Example output:
