@@ -8,11 +8,10 @@ Prototype of Erlang style process/actor model library in OCaml
 
 ## Technical details/discussions
 
-- Right now using Domainslib task pool under the hood
+- Uses `Eio` under the hood
 
-- Not very clear if we can mimic Erlang's `receive ... after` syntax
-  (or Ada's `select ... end` syntax) without having control over
-  effects ourselves,
-  as we need to be able to distinguish "waiting for message" and
-  "waiting on work" promises.
+- Not sure how to distribute tasks across domains - probably need
+  upstream support from `Eio`
 
+- `Eio` fiber API is flexible enough to mimic selective receive
+  with timeout (see `Distrproc.Selective.recv`)
