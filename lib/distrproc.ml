@@ -3,10 +3,13 @@ module K_d = Kcas_data
 
 type gw_id = int
 
+let counter = Atomic.make 0
+
+let counter_fetch_and_incr () =
+  Atomic.fetch_and_add counter 1
+
 module Proc = struct
   module Pid = struct
-    let counter = ref 0
-
     type local = int
 
     type t = {
@@ -22,8 +25,7 @@ module Proc = struct
       x.gw_id = y.gw_id
 
     let make_fresh ~gw_id : t =
-      let local = !counter in
-      counter := !counter + 1;
+      let local = counter_fetch_and_incr () in
       { gw_id; local }
 
     let make ~gw_id local : t =
@@ -61,9 +63,8 @@ module Gateway = struct
   }
 
   let t =
-    let id = Random.int 1000 in (* TODO: replace with better id generation *)
     {
-      id;
+      id = counter_fetch_and_incr ();
       lock = Eio.Mutex.create ();
       proc_queue = Eio.Stream.create 1000;
       proc_promises = [];
@@ -107,80 +108,207 @@ module Gateway = struct
         aux ()
       )
 
-  let attach (p : Proc.Handle.t -> unit) : Proc.Pid.t =
+  let spawn (p : Proc.Handle.t -> unit) : Proc.Pid.t =
     let pid = Proc.Pid.make_fresh ~gw_id:t.id in
     Eio.Stream.add t.proc_queue (pid, p);
     pid
 
-  (* let attach_to_new_domain (t : t) (p : Proc.Handle.t -> unit) : Proc.Pid.t = *)
+  (* let spawn_to_new_domain (t : t) (p : Proc.Handle.t -> unit) : Proc.Pid.t = *)
 end
 
 module Mailbox = struct
   module Local = struct
+    type 'a q = (Proc.Pid.local * 'a) K_d.Queue.t
+
+    type 'a queues = {
+      main : 'a q;
+      save : 'a q; (* same purpose as Erlang's save queue, used as buffer for items which fail the guards *)
+    }
+
     type 'a t = {
-      send : Proc.Handle.t -> Proc.Pid.t -> 'a -> unit;
+      id : int;
+      lock : Eio.Mutex.t;
+      queues : (Proc.Pid.local, 'a queues) Hashtbl.t;
+    }
+
+    type 'a interface = {
+      send : Proc.Handle.t -> (Proc.Pid.t * 'a) -> unit;
       recv : Proc.Handle.t -> Proc.Pid.t * 'a;
     }
 
-    type 'a mailbox = {
-      lock : Eio.Mutex.t;
-      table : (Proc.Pid.local, (Proc.Pid.local * 'a) K_d.Queue.t) Hashtbl.t;
-    }
-
     let make (type a) () : a t =
-      let mailbox : a mailbox =
-        {
-          lock = Eio.Mutex.create ();
-          table = Hashtbl.create 100;
-        }
-      in
-      let send (h : Proc.Handle.t) (pid : Proc.Pid.t) (msg : a) : unit =
-        let self_pid = Proc.Handle.pid h in
-        if Proc.(Pid.same_gw self_pid pid) then (
-          let local_pid = Proc.Pid.local pid in
-          let q =
-            Eio.Mutex.lock mailbox.lock;
-            let q =
-              match Hashtbl.find_opt mailbox.table local_pid with
-              | None -> let q = K_d.Queue.create () in
-                Hashtbl.replace mailbox.table local_pid q;
-                q
-              | Some q -> q
-            in
-            Eio.Mutex.unlock mailbox.lock;
-            q
-          in
-          K_d.Queue.add (Proc.Pid.local self_pid, msg) q
-        )
-      in
-      let recv (h : Proc.Handle.t) : Proc.Pid.t * a =
-        let self_pid = Proc.Handle.pid h in
-        let self_local_pid = Proc.Pid.local self_pid in
-        let gw_id = Proc.Pid.gw_id self_pid in
-        let rec aux () =
-          let q =
-            Eio.Mutex.lock mailbox.lock;
-            let q = Hashtbl.find_opt mailbox.table self_local_pid in
-            Eio.Mutex.unlock mailbox.lock;
-            q
-          in
-          match q with
-          | None -> (
-              Eio.Fiber.yield ();
-              aux ()
-            )
-          | Some q -> (
-              match K_d.Queue.take_opt q with
-              | None -> Eio.Fiber.yield (); aux ()
-              | Some (src, x) -> (Proc.Pid.make ~gw_id src, x)
-            )
-        in
-        aux ()
-      in
       {
-        send;
-        recv;
+        id = counter_fetch_and_incr ();
+        lock = Eio.Mutex.create ();
+        queues = Hashtbl.create 100;
+      }
+
+    let add_queues table local_pid =
+      let main = K_d.Queue.create () in
+      let save = K_d.Queue.create () in
+      Hashtbl.replace table local_pid { main; save };
+      { main; save }
+
+    let send (type a) (t : a t) (h : Proc.Handle.t) ((pid, msg) : Proc.Pid.t * a) : unit =
+      let self_pid = Proc.Handle.pid h in
+      if Proc.(Pid.same_gw self_pid pid) then (
+        let local_pid = Proc.Pid.local pid in
+        let q =
+          Eio.Mutex.lock t.lock;
+          let q =
+            match Hashtbl.find_opt t.queues local_pid with
+            | None ->
+              let { main; save = _ } = add_queues t.queues local_pid in
+              main
+            | Some { main; save = _ } -> main
+          in
+          Eio.Mutex.unlock t.lock;
+          q
+        in
+        K_d.Queue.add (Proc.Pid.local self_pid, msg) q
+      )
+
+    let requeue (type a) (t : a t) (h : Proc.Handle.t) ((pid, msg) : Proc.Pid.t * a) : unit =
+      let self_local_pid = Proc.Pid.local (Proc.Handle.pid h) in
+      let q =
+        Eio.Mutex.lock t.lock;
+        let q =
+          match Hashtbl.find_opt t.queues self_local_pid with
+          | None ->
+            let { main = _; save } = add_queues t.queues self_local_pid in
+            save
+          | Some { main = _; save } -> save
+        in
+        Eio.Mutex.unlock t.lock;
+        q
+      in
+      K_d.Queue.add (Proc.Pid.local pid, msg) q
+
+    let empty_save_into_main ~save ~main =
+      let rec aux () =
+        match K_d.Queue.take_opt save with
+        | None -> ()
+        | Some x -> (
+            K_d.Queue.add x main;
+            aux ()
+          )
+      in
+      aux ()
+
+    let recv (type a) (t : a t) (h : Proc.Handle.t) : Proc.Pid.t * a =
+      let self_pid = Proc.Handle.pid h in
+      let self_local_pid = Proc.Pid.local self_pid in
+      let gw_id = Proc.Pid.gw_id self_pid in
+      let rec aux () =
+        let q =
+          Eio.Mutex.lock t.lock;
+          let q = Hashtbl.find_opt t.queues self_local_pid in
+          Eio.Mutex.unlock t.lock;
+          q
+        in
+        match q with
+        | None -> (
+            Eio.Fiber.yield ();
+            aux ()
+          )
+        | Some { main; save } -> (
+            empty_save_into_main ~save ~main;
+            match K_d.Queue.take_opt main with
+            | None -> Eio.Fiber.yield (); aux ()
+            | Some (src, x) -> (Proc.Pid.make ~gw_id src, x)
+          )
+      in
+      aux ()
+
+    let interface (type a) (t : a t) : a interface =
+      {
+        send = send t;
+        recv = recv t;
       }
   end
 end
 
+module Selective_recv = struct
+  type ctx = {
+    received_msg : bool Atomic.t;
+    timed_out : bool Atomic.t;
+  }
+
+  let make_ctx () = {
+    received_msg = Atomic.make false;
+    timed_out = Atomic.make false;
+  }
+
+  type 'a guard = Proc.Pid.t * 'a -> bool
+
+  type ('a, 'b) body = Proc.Pid.t * 'a -> 'b
+
+  type ('a, 'b) entry = {
+    guard : 'a guard option;
+    body : ('a, 'b) body;
+  }
+
+  let entry (type a b)
+      ?(guard : a guard option)
+      (body : (a, b) body)
+    : (a, b) entry
+    =
+    { guard; body }
+
+  type 'b case = Proc.Handle.t -> ctx -> unit -> 'b
+
+  let case_local (type a b)
+      (mailbox : a Mailbox.Local.t)
+      (entries : (a, b) entry list)
+    : b case =
+    fun h ctx () ->
+    let rec try_all (l : (a, b) entry list) (pid, msg) : (a, b) body option =
+      match l with
+      | [] -> None
+      | { guard; body } :: rest -> (
+          match guard with
+          | None -> Some body
+          | Some guard ->
+            if guard (pid, msg) then (
+              Some body
+            ) else (
+              try_all rest (pid, msg)
+            )
+        )
+    in
+    let rec aux () =
+      let r = Mailbox.Local.recv mailbox h in
+      match try_all entries r with
+      | None -> Mailbox.Local.requeue mailbox h r; aux ()
+      | Some body -> (
+          Atomic.set ctx.received_msg true;
+          body r
+        )
+    in
+    aux ()
+
+  let f (type b)
+      (h : Proc.Handle.t)
+      ?(timeout : (float * (unit -> b)) option)
+      (cases : b case list)
+    : b =
+    let clock = Eio.Stdenv.clock (Proc.Handle.env h) in
+    let ctx = make_ctx () in
+    let l = (List.map (fun case -> case h ctx) cases)
+    in
+    let l =
+      match timeout with
+      | None -> l
+      | Some (timeout, timeout_handler) ->
+        (fun () ->
+           Eio.Time.sleep clock timeout;
+           Atomic.set ctx.timed_out true;
+           if Atomic.get ctx.received_msg then
+             Eio.Fiber.await_cancel ()
+           else
+             timeout_handler ()
+        )
+        :: l
+    in
+    Eio.Fiber.any l
+end
