@@ -45,13 +45,13 @@ module Proc = struct
     let pid (t : t) = t.pid
 
     let env (t : t) = t.env
-    
+
     let sw (t : t) = t.sw
   end
 end
 
 module Gateway = struct
-type proc = (Proc.Handle.t -> unit)
+  type proc = (Proc.Handle.t -> unit)
 
   type t = {
     id : int;
@@ -71,41 +71,41 @@ type proc = (Proc.Handle.t -> unit)
 
   let main (env : Eio.Stdenv.t) : unit =
     Switch.run (fun sw ->
-      let rec aux () =
-        match Eio.Stream.take_nonblocking t.proc_queue with
-        | Some (pid, proc) -> (
-          let promise =
-          Eio.Fiber.fork_promise ~sw (fun () ->
-            Switch.run (fun sw ->
-            let handle = Proc.Handle.make ~pid ~env ~sw in
-            proc handle
+        let rec aux () =
+          match Eio.Stream.take_nonblocking t.proc_queue with
+          | Some (pid, proc) -> (
+              let promise =
+                Eio.Fiber.fork_promise ~sw (fun () ->
+                    Switch.run (fun sw ->
+                        let handle = Proc.Handle.make ~pid ~env ~sw in
+                        proc handle
+                      )
+                  )
+              in
+              Eio.Mutex.lock t.lock;
+              t.proc_promises <- promise :: t.proc_promises;
+              Eio.Mutex.unlock t.lock;
+              aux ()
             )
-          )
-          in
-          Eio.Mutex.lock t.lock;
-          t.proc_promises <- promise :: t.proc_promises;
-          Eio.Mutex.unlock t.lock;
-          aux ()
-        )
-        | None -> (
-          let all_procs_finished =
-            Eio.Mutex.lock t.lock;
-            let r =
-              List.for_all (fun p -> Eio.Promise.is_resolved p) t.proc_promises
-            in
-            Eio.Mutex.unlock t.lock;
-            r
-          in
-          if all_procs_finished then
-            ()
-          else (
-            Eio.Time.sleep (Eio.Stdenv.clock env) 0.05;
-            aux ()
-          )
-        )
-      in
-      aux ()
-    )
+          | None -> (
+              let all_procs_finished =
+                Eio.Mutex.lock t.lock;
+                let r =
+                  List.for_all (fun p -> Eio.Promise.is_resolved p) t.proc_promises
+                in
+                Eio.Mutex.unlock t.lock;
+                r
+              in
+              if all_procs_finished then
+                ()
+              else (
+                Eio.Time.sleep (Eio.Stdenv.clock env) 0.05;
+                aux ()
+              )
+            )
+        in
+        aux ()
+      )
 
   let attach (p : Proc.Handle.t -> unit) : Proc.Pid.t =
     let pid = Proc.Pid.make_fresh ~gw_id:t.id in
