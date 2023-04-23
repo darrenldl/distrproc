@@ -108,5 +108,5 @@ Example output:
   a: I haven't received anything useful yet
   b: received A from (0, 3)
   a: I haven't received anything useful yet
-  a: received A from (0, 4)  a: my pid is (0, 0)
+  a: received A from (0, 4)
 *)
