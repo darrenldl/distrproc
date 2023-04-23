@@ -1,4 +1,4 @@
-SRCFILES = lib/*.ml debug/*.ml
+SRCFILES = lib/*.ml lib/*.mli debug/*.ml
 
 OCPINDENT = ocp-indent \
 	--inplace \

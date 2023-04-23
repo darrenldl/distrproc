@@ -22,11 +22,11 @@ end
 
 module Mailbox : sig
   module Local : sig
-  type 'a t = {
-    send : Proc.Handle.t -> Proc.Pid.t -> 'a -> unit;
-    recv : Proc.Handle.t -> Proc.Pid.t * 'a;
-  }
-val make : unit -> 'a t
+    type 'a t = {
+      send : Proc.Handle.t -> Proc.Pid.t -> 'a -> unit;
+      recv : Proc.Handle.t -> Proc.Pid.t * 'a;
+    }
+    val make : unit -> 'a t
   end
 end
 
